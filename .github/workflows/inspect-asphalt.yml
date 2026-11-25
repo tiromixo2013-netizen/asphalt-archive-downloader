@@ -1,0 +1,74 @@
+name: Inspect Asphalt 53.5.3a package
+on:
+  push:
+    paths:
+      - ".github/workflows/inspect-asphalt.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Download original archive parts
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release download asphalt-53.5.3a --repo "$GH_REPO" --pattern 'Asphalt.zip.part*' --dir .
+          test -s Asphalt.zip.part00
+          test -s Asphalt.zip.part01
+          test -s Asphalt.zip.part02
+          cat Asphalt.zip.part00 Asphalt.zip.part01 Asphalt.zip.part02 > Asphalt.zip
+          gh release download asphalt-53.5.3a --repo "$GH_REPO" --pattern 'Asphalt.zip.sha256' --dir .
+          sha256sum -c Asphalt.zip.sha256
+      - name: Inventory archive and extract APK payloads
+        run: |
+          set -euo pipefail
+          mkdir -p inspect/apks
+          python3 - <<'PY'
+          import zipfile, pathlib, json
+          z = zipfile.ZipFile("Asphalt.zip")
+          entries = z.infolist()
+          names = [x.filename for x in entries]
+          pathlib.Path("inspect/archive-inventory.txt").write_text("\n".join(
+              f"{x.file_size}\t{x.compress_size}\t{x.filename}" for x in entries
+          ))
+          selected = [x for x in entries if x.filename.lower().endswith(".apk")]
+          report = []
+          for i, item in enumerate(selected):
+              safe = pathlib.Path(item.filename).name
+              out = pathlib.Path("inspect/apks") / f"{i:02d}-{safe}"
+              out.write_bytes(z.read(item))
+              report.append({"archive_path": item.filename, "extracted": str(out), "bytes": item.file_size})
+          pathlib.Path("inspect/apk-index.json").write_text(json.dumps(report, indent=2))
+          print(f"Archive entries: {len(entries)}; APKs extracted: {len(selected)}")
+          for row in report: print(row)
+          PY
+      - name: Inspect APK metadata and native libraries
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y aapt
+          {
+            for apk in inspect/apks/*.apk; do
+              [ -e "$apk" ] || continue
+              echo "===== $apk ====="
+              aapt dump badging "$apk" | head -n 35 || true
+              echo "--- native libraries ---"
+              unzip -Z1 "$apk" | grep -E '^lib/[^/]+/.*\.so$' | head -n 250 || true
+              echo "--- graphics / engine strings ---"
+              unzip -Z1 "$apk" | grep -Ei '(unity|unreal|gameloft|render|shader|vulkan|opengl|\.so$)' | head -n 250 || true
+            done
+          } > inspect/apk-report.txt
+      - name: Upload inspection bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: asphalt-53.5.3a-inspection
+          path: inspect/
+          if-no-files-found: error
+          retention-days: 7
