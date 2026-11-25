@@ -13,17 +13,29 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - name: Download and verify archive
+      - name: Download and verify public release archive
         env:
-          GH_TOKEN: \${{ github.token }}
-          GH_REPO: \${{ github.repository }}
+          RELEASE_API: https://api.github.com/repos/${{ github.repository }}/releases/tags/asphalt-53.5.3a
         run: |
           set -euo pipefail
-          gh release download asphalt-53.5.3a --repo "$GH_REPO" --pattern 'Asphalt.zip.part*' --dir .
+          python3 - <<'PY'
+          import json, urllib.request
+          req=urllib.request.Request(__import__('os').environ['RELEASE_API'],headers={'User-Agent':'asphalt-resource-research'})
+          with urllib.request.urlopen(req,timeout=60) as r: release=json.load(r)
+          assets={a['name']:a['browser_download_url'] for a in release['assets']}
+          names=['Asphalt.zip.part00','Asphalt.zip.part01','Asphalt.zip.part02','Asphalt.zip.sha256']
+          for name in names:
+              if name not in assets: raise SystemExit('Missing release asset: '+name)
+              req=urllib.request.Request(assets[name],headers={'User-Agent':'asphalt-resource-research'})
+              with urllib.request.urlopen(req,timeout=600) as r, open(name,'wb') as f:
+                  while True:
+                      chunk=r.read(1024*1024)
+                      if not chunk: break
+                      f.write(chunk)
+          PY
           cat Asphalt.zip.part00 Asphalt.zip.part01 Asphalt.zip.part02 > Asphalt.zip
-          gh release download asphalt-53.5.3a --repo "$GH_REPO" --pattern 'Asphalt.zip.sha256' --dir .
           sha256sum -c Asphalt.zip.sha256
-      - name: Scan main.apk payloads for decoded identifiers and settings strings
+      - name: Scan main.apk payloads for real text and shader candidates
         run: |
           set -euo pipefail
           mkdir -p reports
@@ -31,34 +43,35 @@ jobs:
           import zipfile,io,re,collections,pathlib
           outer=zipfile.ZipFile("Asphalt.zip")
           candidates=[n for n in outer.namelist() if n.lower().endswith("/main.apk") or n.lower()=="main.apk"]
-          if not candidates:
-              raise SystemExit("main.apk not found in outer archive")
+          if not candidates: raise SystemExit("main.apk not found in outer archive")
           apk=zipfile.ZipFile(io.BytesIO(outer.read(candidates[0])))
-          keywords=re.compile(r'graphics|quality|resolution|frame.?rate|fps|render|texture|shader|settings|anti.?alias|shadow|upscal|vsync|refresh.?rate|menu|option|performance|display|preset|scale|vulkan|opengl',re.I)
-          ascii_pat=rb'[\x20-\x7e]{4,}'
-          hits=[]; inventory=[]; magic=collections.Counter()
+          inventory=[]; magic=collections.Counter(); hits=[]; shaders=[]
+          terms=re.compile(r'(?<![A-Za-z0-9_])(graphics|quality|resolution|frame.?rate|fps|render|texture|shader|settings|anti.?alias|shadow|upscal|vsync|refresh.?rate|performance|display|preset|scale|vulkan|opengl)(?![A-Za-z0-9_])',re.I)
+          ascii_pat=rb'[\x20-\x7e]{8,}'
+          shader_start=re.compile(rb'(?m)^\s*(//|#version|#import|#define|precision\s|uniform\s|attribute\s|varying\s|void\s+main|float\s+)',re.I)
           for info in apk.infolist():
               if info.is_dir() or info.filename=="AndroidManifest.xml": continue
               try: b=apk.read(info.filename)
               except Exception: continue
-              magic[b[:8].hex()]+=1
-              inventory.append((len(b),info.filename,b[:16].hex()))
-              for mode,data in (("raw",b),("xor_ab",bytes(x^0xAB for x in b))):
+              magic[b[:8].hex()]+=1; inventory.append((len(b),info.filename,b[:16].hex()))
+              for enc,data in (("ascii",b),("xor_ab",bytes(x^0xAB for x in b))):
                   for q in re.findall(ascii_pat,data):
                       s=q.decode("ascii","ignore")
-                      if keywords.search(s):
-                          hits.append((mode,info.filename,len(b),s[:240]))
-                          if len(hits)>=30000: break
-                  if len(hits)>=30000: break
-          pathlib.Path("reports/main-resource-inventory.txt").write_text("\n".join(f"{n}\t{p}\t{h}" for n,p,h in sorted(inventory,reverse=True)),encoding="utf-8")
-          pathlib.Path("reports/main-resource-string-hits.txt").write_text("\n".join(f"{m}\t{p}\t{n}\t{s}" for m,p,n,s in hits),encoding="utf-8")
-          pathlib.Path("reports/main-resource-magic.txt").write_text("\n".join(f"{k}\t{v}" for k,v in magic.most_common(300)),encoding="utf-8")
-          print("entries",len(inventory),"keyword hits",len(hits),"top magic groups",len(magic))
+                      if terms.search(s): hits.append((enc,info.filename,len(b),s[:240]))
+              if shader_start.search(b[:4096]):
+                  sample=b[:12000].decode("utf-8","replace")
+                  printable=sum(c.isprintable() or c in '\\r\\n\\t' for c in sample)/max(1,len(sample))
+                  if printable>0.82: shaders.append((info.filename,len(b),sample[:5000]))
+          pathlib.Path("reports/main-resource-inventory.txt").write_text("\\n".join(f"{n}\\t{p}\\t{h}" for n,p,h in sorted(inventory,reverse=True)),encoding="utf-8")
+          pathlib.Path("reports/main-resource-string-hits.txt").write_text("\\n".join(f"{m}\\t{p}\\t{n}\\t{s}" for m,p,n,s in hits[:20000]),encoding="utf-8")
+          pathlib.Path("reports/main-resource-magic.txt").write_text("\\n".join(f"{k}\\t{v}" for k,v in magic.most_common(300)),encoding="utf-8")
+          pathlib.Path("reports/shader-candidates.txt").write_text("\\n\\n".join(f"FILE {p} SIZE {n}\\n{s}" for p,n,s in shaders[:100]),encoding="utf-8")
+          print("entries",len(inventory),"keyword hits",len(hits),"shader candidates",len(shaders))
           PY
       - name: Upload scan reports
         uses: actions/upload-artifact@v4
         with:
-          name: asphalt-main-resource-scan
+          name: asphalt-main-resource-scan-fixed
           path: reports/
           if-no-files-found: error
           retention-days: 7
