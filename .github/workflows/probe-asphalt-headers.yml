@@ -1,0 +1,71 @@
+name: Probe Asphalt packed resource headers
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/probe-asphalt-headers.yml"
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Download and verify archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release download asphalt-53.5.3a --repo "$GH_REPO" --pattern 'Asphalt.zip.part*' --dir .
+          cat Asphalt.zip.part00 Asphalt.zip.part01 Asphalt.zip.part02 > Asphalt.zip
+          gh release download asphalt-53.5.3a --repo "$GH_REPO" --pattern 'Asphalt.zip.sha256' --dir .
+          sha256sum -c Asphalt.zip.sha256
+      - name: Extract headers and locate Zstandard frames
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet zstandard
+          mkdir -p reports
+          python3 - <<'PY'
+          import zipfile,io,pathlib,collections,zstandard,re
+          outer=zipfile.ZipFile("Asphalt.zip")
+          sigs={b'jmox':[],b'jclx':[],b'janx':[],b'tex ':[]}
+          magic=b'\\x28\\xb5\\x2f\\xfd'
+          rows=[]
+          for apk in sorted(n for n in outer.namelist() if n.lower().endswith(('.apk')) and n.rsplit('/',1)[-1].lower() in ('main.apk','mdc.apk','mde.apk','gin.apk','lm.apk','prb.apk','tex.apk','tex_lowres.apk')):
+              z=zipfile.ZipFile(io.BytesIO(outer.read(apk)))
+              for info in z.infolist():
+                  if info.is_dir(): continue
+                  b=z.read(info.filename)
+                  for sig in sigs:
+                      p=b.find(sig)
+                      if p>=0 and len(sigs[sig])<5:
+                          sigs[sig].append((apk,info.filename,b,p))
+          d=zstandard.ZstdDecompressor()
+          for sig,items in sigs.items():
+              rows.append(f'## {sig!r} count_samples={len(items)}')
+              for apk,name,b,p in items:
+                  rows.append(f'### {apk} {name} size={len(b)} pos={p} header={b[max(0,p-8):p+64].hex()}')
+                  offs=[]; start=0
+                  while True:
+                      q=b.find(magic,start)
+                      if q<0: break
+                      offs.append(q); start=q+1
+                  rows.append('zstd_offsets='+repr(offs[:30]))
+                  for q in offs[:10]:
+                      try:
+                          raw=d.decompress(b[q:],max_output_size=16*1024*1024)
+                          rows.append(f'DECODE_OK offset={q} bytes={len(raw)} prefix={raw[:48].hex()}')
+                          if len(raw)>0:
+                              pathlib.Path('reports').joinpath(f'{sig.decode("ascii").strip()}_{len(rows)}.bin').write_bytes(raw)
+                      except Exception as e:
+                          rows.append(f'decode_fail offset={q} {str(e)[:160]}')
+          pathlib.Path('reports/header-probe.txt').write_text('\\n'.join(rows),encoding='utf-8')
+          print('sample headers',sum(map(len,sigs.values())))
+          PY
+      - name: Upload headers
+        uses: actions/upload-artifact@v4
+        with:
+          name: asphalt-packed-resource-headers
+          path: reports/
+          retention-days: 7
