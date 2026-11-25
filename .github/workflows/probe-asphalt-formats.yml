@@ -1,0 +1,81 @@
+name: Probe Asphalt packed resource formats
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/probe-asphalt-formats.yml"
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Download and verify archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release download asphalt-53.5.3a --repo "$GH_REPO" --pattern 'Asphalt.zip.part*' --dir .
+          cat Asphalt.zip.part00 Asphalt.zip.part01 Asphalt.zip.part02 > Asphalt.zip
+          gh release download asphalt-53.5.3a --repo "$GH_REPO" --pattern 'Asphalt.zip.sha256' --dir .
+          sha256sum -c Asphalt.zip.sha256
+      - name: Probe JCLX and JANX payloads
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet zstandard
+          mkdir -p reports
+          python3 - <<'PY'
+          import zipfile,io,struct,pathlib,re,collections,zstandard
+          outer=zipfile.ZipFile("Asphalt.zip")
+          names=[n for n in outer.namelist() if n.lower().endswith(("main.apk","mdc.apk","mde.apk","gin.apk","lm.apk","prb.apk"))]
+          dec=zstandard.ZstdDecompressor()
+          out=[]
+          strings=re.compile(rb'[ -~]{5,}')
+          for apk in names:
+              z=zipfile.ZipFile(io.BytesIO(outer.read(apk)))
+              for info in z.infolist():
+                  if info.is_dir(): continue
+                  b=z.read(info.filename)
+                  if len(b)<20: continue
+                  sig=b[1:7]
+                  if sig not in (b'jclx\\r\\n',b'janx\\r\\n'): continue
+                  out.append(f"\\n## {apk} :: {info.filename} size={len(b)} sig={sig!r}")
+                  try:
+                      if sig==b'jclx\\r\\n':
+                          # Layout follows the public Asphalt 9 JCLX unpacker.
+                          csize=struct.unpack_from('<I',b,27)[0]
+                          usize=struct.unpack_from('<I',b,31)[0]
+                          off=35
+                          payload=b[off:off+csize]
+                          raw=dec.decompress(payload,max_output_size=min(max(usize,1),64*1024*1024))
+                          out.append(f"JCLX compressed={csize} expected={usize} decoded={len(raw)}")
+                          sample=strings.findall(raw[:8*1024*1024])
+                          out.extend("STR "+s[:240].decode('ascii','replace') for s in sample[:100])
+                          pathlib.Path("reports").joinpath(info.filename.split('/')[-1]+".decoded.bin").write_bytes(raw)
+                      else:
+                          # JANX has a count followed by per-resource compressed/decompressed sizes.
+                          count=b[15]
+                          pos=16
+                          out.append(f"JANX resources={count}")
+                          for i in range(min(count,64)):
+                              if pos+12>len(b): break
+                              _u,cs,us=struct.unpack_from('<III',b,pos); pos+=12
+                              if cs<=0 or cs>len(b)-pos or us>64*1024*1024: break
+                              raw=dec.decompress(b[pos:pos+cs],max_output_size=max(us,1)); pos+=cs
+                              out.append(f"RESOURCE {i} compressed={cs} expected={us} decoded={len(raw)}")
+                              ss=strings.findall(raw[:4*1024*1024])
+                              out.extend("STR "+s[:240].decode('ascii','replace') for s in ss[:40])
+                              if i<4: pathlib.Path("reports").joinpath(f"{info.filename.split('/')[-1]}_{i}.bin").write_bytes(raw)
+                  except Exception as e:
+                      out.append("ERROR "+repr(e)+" first96="+b[:96].hex())
+          pathlib.Path("reports/packed-resource-probe.txt").write_text("\\n".join(out),encoding="utf-8")
+          print("probe entries",sum(1 for x in out if x.startswith("##")),"report lines",len(out))
+          PY
+      - name: Upload probe
+        uses: actions/upload-artifact@v4
+        with:
+          name: asphalt-packed-resource-probe
+          path: reports/
+          retention-days: 7
