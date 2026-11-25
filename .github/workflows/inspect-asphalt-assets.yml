@@ -94,7 +94,8 @@ jobs:
                           m=keywords.search(raw)
                           if m:
                               s=max(0,m.start()-100); e=min(len(raw),m.end()+180)
-                              text_hits.append(f"## {apk} {info.filename} size={len(b)} encoding={enc}\n{raw[s:e].decode("utf-8","replace")[:400]}")
+                              snippet=raw[s:e].decode("utf-8","replace")[:400]
+                              text_hits.append(f"## {apk} {info.filename} size={len(b)} encoding={enc}\n{snippet}")
                               break
           pathlib.Path("reports/asset-magic-signatures.txt").write_text("\n".join(f"{a}\t{m}\t{c}" for (a,m),c in magic.most_common(300)),encoding="utf-8")
           pathlib.Path("reports/all-payload-string-hits.txt").write_text("\n---\n".join(text_hits[:2500]),encoding="utf-8")
