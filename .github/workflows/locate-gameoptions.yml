@@ -1,0 +1,83 @@
+name: Locate Asphalt Android graphics configuration
+on:
+  push:
+    paths:
+      - ".github/workflows/locate-gameoptions.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  locate-gameoptions:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Download and verify public release archive
+        env:
+          RELEASE_API: https://api.github.com/repos/${{ github.repository }}/releases/tags/asphalt-53.5.3a
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, urllib.request, os
+          req=urllib.request.Request(os.environ['RELEASE_API'],headers={'User-Agent':'asphalt-gameoptions-research'})
+          with urllib.request.urlopen(req,timeout=60) as r: release=json.load(r)
+          assets={a['name']:a['browser_download_url'] for a in release['assets']}
+          for name in ['Asphalt.zip.part00','Asphalt.zip.part01','Asphalt.zip.part02','Asphalt.zip.sha256']:
+              req=urllib.request.Request(assets[name],headers={'User-Agent':'asphalt-gameoptions-research'})
+              with urllib.request.urlopen(req,timeout=600) as r, open(name,'wb') as f:
+                  while True:
+                      b=r.read(1024*1024)
+                      if not b: break
+                      f.write(b)
+          PY
+          cat Asphalt.zip.part00 Asphalt.zip.part01 Asphalt.zip.part02 > Asphalt.zip
+          sha256sum -c Asphalt.zip.sha256
+      - name: Search every nested APK payload for Android game options
+        run: |
+          set -euo pipefail
+          mkdir -p out/matches out/reports
+          python3 - <<'PY'
+          import zipfile,io,pathlib,re,hashlib
+          outer=zipfile.ZipFile('Asphalt.zip')
+          terms=[
+            b'render_screenResolutionScale',
+            b'render_scene3DResolutionScale',
+            b'render_scene3DResolutions',
+            b'render_allowedResolutionScaleOptions',
+            b'render_allowedQualityFPS',
+            b'render_allowedFPS',
+            b'render_useFixedResolution',
+            b'render_postFXResolution_scale',
+            b'GameOptions_android.json',
+            b'preferred-quality-fps',
+            b'preferred-performance-fps'
+          ]
+          rows=[]; saved=set()
+          apk_names=[n for n in outer.namelist() if n.lower().endswith('.apk')]
+          for apkname in sorted(apk_names):
+              try: apk=zipfile.ZipFile(io.BytesIO(outer.read(apkname)))
+              except Exception as e:
+                  rows.append(f'INVALID APK {apkname}: {e}'); continue
+              for info in apk.infolist():
+                  if info.is_dir(): continue
+                  try: data=apk.read(info.filename)
+                  except Exception: continue
+                  hits=[t.decode() for t in terms if t.lower() in data.lower()]
+                  if not hits: continue
+                  sha=hashlib.sha256(data).hexdigest()[:16]
+                  rows.append(f'APK={apkname}\tPATH={info.filename}\tSIZE={len(data)}\tSHA256={sha}\tHITS={",".join(hits)}')
+                  if len(data)<=32*1024*1024 and sha not in saved:
+                      safe=re.sub(r'[^A-Za-z0-9_.-]+','_',info.filename.rsplit('/',1)[-1])[:80]
+                      pathlib.Path(f'out/matches/{sha}_{safe}.bin').write_bytes(data)
+                      saved.add(sha)
+          pathlib.Path('out/reports/gameoptions-payload-hits.txt').write_text('\n'.join(rows),encoding='utf-8')
+          print('nested APKs',len(apk_names),'matching payloads',len(rows),'saved',len(saved))
+          PY
+      - name: Upload matching configuration payloads
+        uses: actions/upload-artifact@v4
+        with:
+          name: asphalt-gameoptions-payloads
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
