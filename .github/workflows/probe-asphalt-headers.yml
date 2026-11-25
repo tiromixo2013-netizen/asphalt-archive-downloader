@@ -30,7 +30,7 @@ jobs:
           import zipfile,io,pathlib,collections,zstandard,re
           outer=zipfile.ZipFile("Asphalt.zip")
           sigs={b'jmox':[],b'jclx':[],b'janx':[],b'tex ':[]}
-          magic=b'\\x28\\xb5\\x2f\\xfd'
+          magic=bytes.fromhex('28 b5 2f fd')
           rows=[]
           for apk in sorted(n for n in outer.namelist() if n.lower().endswith(('.apk')) and n.rsplit('/',1)[-1].lower() in ('main.apk','mdc.apk','mde.apk','gin.apk','lm.apk','prb.apk','tex.apk','tex_lowres.apk')):
               z=zipfile.ZipFile(io.BytesIO(outer.read(apk)))
@@ -54,7 +54,7 @@ jobs:
                   rows.append('zstd_offsets='+repr(offs[:30]))
                   for q in offs[:10]:
                       try:
-                          raw=d.decompress(b[q:],max_output_size=16*1024*1024)
+                          reader=d.stream_reader(io.BytesIO(b[q:]))\n                          raw=reader.read(16*1024*1024+1)\n                          reader.close()
                           rows.append(f'DECODE_OK offset={q} bytes={len(raw)} prefix={raw[:48].hex()}')
                           if len(raw)>0:
                               pathlib.Path('reports').joinpath(f'{sig.decode("ascii").strip()}_{len(rows)}.bin').write_bytes(raw)
