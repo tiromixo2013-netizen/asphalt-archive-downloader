@@ -47,9 +47,10 @@ jobs:
           print(hits[0],p.stat().st_size)
           PY
           ./tools/jadx/bin/jadx --no-res --threads-count 2 -d work/jadx work/main.apk > reports/jadx.log 2>&1 || true
-          find work/jadx -type f | head -n 500 > reports/decompiled-file-list.txt
-          grep -RniE 'graphics|quality|resolution|frame.?rate|refresh.?rate|settings|render|surfaceview|gameactivity|swappy|egl|gles' work/jadx/sources 2>/dev/null | head -n 1800 > reports/android-code-hits.txt || true
-          unzip -Z1 work/main.apk | grep -Ei '(^assets/|\.json$|\.xml$|\.dat$|\.bin$|\.pak$|\.bundle$)' | head -n 5000 > reports/main-apk-assets.txt
+          find work/jadx -type f > reports/decompiled-file-list.all.txt
+          sed -n '1,500p' reports/decompiled-file-list.all.txt > reports/decompiled-file-list.txt
+          grep -RniE 'graphics|quality|resolution|frame.?rate|refresh.?rate|settings|render|surfaceview|gameactivity|swappy|egl|gles' work/jadx/sources 2>/dev/null | sed -n '1,1800p' > reports/android-code-hits.txt || true
+          unzip -Z1 work/main.apk | grep -Ei '(^assets/|\.json$|\.xml$|\.dat$|\.bin$|\.pak$|\.bundle$)' | sed -n '1,5000p' > reports/main-apk-assets.txt
           unzip -p work/main.apk AndroidManifest.xml > reports/manifest-binary.xml || true
       - name: Collect native entrypoints and game-specific strings
         run: |
@@ -70,8 +71,8 @@ jobs:
             for so in work/native/*.so; do
               echo "===== $so ====="
               file "$so"
-              readelf -Ws "$so" | grep -Ei 'GameActivity|Swappy|EGL|gl[A-Z]|render|surface|frame|quality|resolution|setting|shader|texture|present|swap' | head -n 500 || true
-              strings -a "$so" | grep -Ei 'graphics.?settings|render.?scale|resolution|quality|frame.?rate|refresh.?rate|vsync|swap.?interval|shader|render.?target|framebuffer|upscal|anti.?alias|texture.?quality|shadow.?quality' | head -n 1000 || true
+              readelf -Ws "$so" | grep -Ei 'GameActivity|Swappy|EGL|gl[A-Z]|render|surface|frame|quality|resolution|setting|shader|texture|present|swap' | sed -n '1,500p' || true
+              strings -a "$so" | grep -Ei 'graphics.?settings|render.?scale|resolution|quality|frame.?rate|refresh.?rate|vsync|swap.?interval|shader|render.?target|framebuffer|upscal|anti.?alias|texture.?quality|shadow.?quality' | sed -n '1,1000p' || true
             done
           } > reports/native-entrypoints.txt
       - name: Upload compact research reports
