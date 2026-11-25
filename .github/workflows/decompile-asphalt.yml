@@ -1,0 +1,83 @@
+name: Decompile Asphalt Android layer
+on:
+  push:
+    paths:
+      - ".github/workflows/decompile-asphalt.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  decompile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Download and verify original archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release download asphalt-53.5.3a --repo "$GH_REPO" --pattern 'Asphalt.zip.part*' --dir .
+          cat Asphalt.zip.part00 Asphalt.zip.part01 Asphalt.zip.part02 > Asphalt.zip
+          gh release download asphalt-53.5.3a --repo "$GH_REPO" --pattern 'Asphalt.zip.sha256' --dir .
+          sha256sum -c Asphalt.zip.sha256
+      - name: Install analysis tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y unzip zip jq binutils file
+          mkdir -p tools
+          url=$(curl -fsSL https://api.github.com/repos/skylot/jadx/releases/latest | jq -r '.assets[] | select(.name | test("^jadx-[0-9.]+\\.zip$")) | .browser_download_url' | head -n1)
+          test -n "$url"
+          curl -fL "$url" -o tools/jadx.zip
+          unzip -q tools/jadx.zip -d tools/jadx
+          chmod +x tools/jadx/bin/jadx
+      - name: Extract and decompile application APK
+        run: |
+          set -euo pipefail
+          mkdir -p work reports
+          python3 - <<'PY'
+          import zipfile, pathlib
+          z=zipfile.ZipFile("Asphalt.zip")
+          hits=[n for n in z.namelist() if n.lower().endswith("asphalt-53.5.3a.apk")]
+          if not hits: raise SystemExit("main APK not found")
+          p=pathlib.Path("work/main.apk"); p.write_bytes(z.read(hits[0]))
+          pathlib.Path("reports/main-apk-path.txt").write_text(hits[0])
+          print(hits[0],p.stat().st_size)
+          PY
+          ./tools/jadx/bin/jadx --no-res --threads-count 2 -d work/jadx work/main.apk > reports/jadx.log 2>&1 || true
+          find work/jadx -type f | head -n 500 > reports/decompiled-file-list.txt
+          grep -RniE 'graphics|quality|resolution|frame.?rate|refresh.?rate|settings|render|surfaceview|gameactivity|swappy|egl|gles' work/jadx/sources 2>/dev/null | head -n 1800 > reports/android-code-hits.txt || true
+          unzip -Z1 work/main.apk | grep -Ei '(^assets/|\.json$|\.xml$|\.dat$|\.bin$|\.pak$|\.bundle$)' | head -n 5000 > reports/main-apk-assets.txt
+          unzip -p work/main.apk AndroidManifest.xml > reports/manifest-binary.xml || true
+      - name: Collect native entrypoints and game-specific strings
+        run: |
+          set -euo pipefail
+          mkdir -p work/native
+          python3 - <<'PY'
+          import zipfile, pathlib
+          z=zipfile.ZipFile("Asphalt.zip")
+          for n in z.namelist():
+              if n.endswith("config.arm64_v8a.apk"):
+                  a=zipfile.ZipFile(__import__('io').BytesIO(z.read(n)))
+                  for f in a.namelist():
+                      if f.endswith("lib/arm64-v8a/libAsphalt9.so") or f.endswith("lib/arm64-v8a/libanzu.so"):
+                          p=pathlib.Path("work/native")/pathlib.Path(f).name
+                          p.write_bytes(a.read(f))
+          PY
+          {
+            for so in work/native/*.so; do
+              echo "===== $so ====="
+              file "$so"
+              readelf -Ws "$so" | grep -Ei 'GameActivity|Swappy|EGL|gl[A-Z]|render|surface|frame|quality|resolution|setting|shader|texture|present|swap' | head -n 500 || true
+              strings -a "$so" | grep -Ei 'graphics.?settings|render.?scale|resolution|quality|frame.?rate|refresh.?rate|vsync|swap.?interval|shader|render.?target|framebuffer|upscal|anti.?alias|texture.?quality|shadow.?quality' | head -n 1000 || true
+            done
+          } > reports/native-entrypoints.txt
+      - name: Upload compact research reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: asphalt-53.5.3a-android-layer-research
+          path: reports/
+          if-no-files-found: error
+          retention-days: 7
