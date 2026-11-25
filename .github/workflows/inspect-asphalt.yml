@@ -34,7 +34,6 @@ jobs:
           import zipfile, pathlib, json
           z = zipfile.ZipFile("Asphalt.zip")
           entries = z.infolist()
-          names = [x.filename for x in entries]
           pathlib.Path("inspect/archive-inventory.txt").write_text("\n".join(
               f"{x.file_size}\t{x.compress_size}\t{x.filename}" for x in entries
           ))
@@ -65,10 +64,13 @@ jobs:
               unzip -Z1 "$apk" | grep -Ei '(unity|unreal|gameloft|render|shader|vulkan|opengl|\.so$)' | head -n 250 || true
             done
           } > inspect/apk-report.txt
-      - name: Upload inspection bundle
+      - name: Upload compact inspection reports only
         uses: actions/upload-artifact@v4
         with:
-          name: asphalt-53.5.3a-inspection
-          path: inspect/
+          name: asphalt-53.5.3a-inspection-reports
+          path: |
+            inspect/archive-inventory.txt
+            inspect/apk-index.json
+            inspect/apk-report.txt
           if-no-files-found: error
           retention-days: 7
