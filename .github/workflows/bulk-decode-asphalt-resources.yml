@@ -1,0 +1,96 @@
+name: Bulk decode Asphalt JCLX and JANX resources
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/bulk-decode-asphalt-resources.yml"
+permissions:
+  contents: read
+jobs:
+  decode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Download and verify game archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release download asphalt-53.5.3a --repo "$GH_REPO" --pattern 'Asphalt.zip.part*' --dir .
+          cat Asphalt.zip.part00 Asphalt.zip.part01 Asphalt.zip.part02 > Asphalt.zip
+          gh release download asphalt-53.5.3a --repo "$GH_REPO" --pattern 'Asphalt.zip.sha256' --dir .
+          sha256sum -c Asphalt.zip.sha256
+      - name: Decode all JCLX and JANX Zstandard streams
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet zstandard
+          mkdir -p output/decoded
+          python3 - <<'PY'
+          import zipfile, io, pathlib, json, hashlib, zstandard, re
+          outer=zipfile.ZipFile("Asphalt.zip")
+          targets=[n for n in outer.namelist() if n.rsplit("/",1)[-1].lower()=="mde.apk"]
+          if not targets:
+              raise SystemExit("mde.apk not found in archive")
+          z=zipfile.ZipFile(io.BytesIO(outer.read(targets[0])))
+          d=zstandard.ZstdDecompressor()
+          magic=b"\\x28\\xb5\\x2f\\xfd"
+          sigs={"JCLX":b"\\x89\\x6ajclx","JANX":b"\\x89\\x6ajanx"}
+          rows=[]
+          total=0
+          cap_total=700*1024*1024
+          cap_frame=64*1024*1024
+          for info in z.infolist():
+              if info.is_dir(): continue
+              data=z.read(info.filename)
+              kind=next((k for k,v in sigs.items() if data.find(v)>=0),None)
+              if not kind: continue
+              positions=[]
+              start=0
+              while True:
+                  p=data.find(magic,start)
+                  if p<0: break
+                  positions.append(p); start=p+4
+              decoded=[]
+              for idx,p in enumerate(positions):
+                  if total>=cap_total: break
+                  try:
+                      reader=d.stream_reader(io.BytesIO(data[p:]))
+                      raw=reader.read(cap_frame+1)
+                      reader.close()
+                      if not raw or len(raw)>cap_frame:
+                          rows.append({"kind":kind,"resource":info.filename,"offset":p,"status":"skipped_size","decoded_bytes":len(raw)})
+                          continue
+                      total+=len(raw)
+                      if total>cap_total:
+                          rows.append({"kind":kind,"resource":info.filename,"offset":p,"status":"total_cap","decoded_bytes":len(raw)})
+                          break
+                      base=pathlib.Path(info.filename).name
+                      out=pathlib.Path("output/decoded")/f"{kind.lower()}_{base}_{idx:03d}.bin"
+                      out.write_bytes(raw)
+                      decoded.append(out.name)
+                      rows.append({"kind":kind,"resource":info.filename,"offset":p,"status":"ok","decoded_bytes":len(raw),"sha256":hashlib.sha256(raw).hexdigest(),"output":out.name})
+                  except Exception as e:
+                      rows.append({"kind":kind,"resource":info.filename,"offset":p,"status":"error","error":str(e)[:200]})
+              if not positions:
+                  rows.append({"kind":kind,"resource":info.filename,"status":"no_zstd_frame"})
+          pathlib.Path("output/manifest.json").write_text(json.dumps({"source_apk":targets[0],"decoded_total_bytes":total,"records":rows},indent=2))
+          # Search decoded binary payloads for likely UI/settings/render vocabulary.
+          terms=re.compile(rb"graphics|quality|resolution|render|texture|frame.?rate|fps|settings|shader|vulkan|opengl|upscal",re.I)
+          hits=[]
+          for p in pathlib.Path("output/decoded").glob("*.bin"):
+              b=p.read_bytes()
+              for m in terms.finditer(b):
+                  lo=max(0,m.start()-48); hi=min(len(b),m.end()+96)
+                  hits.append({"file":p.name,"offset":m.start(),"context":b[lo:hi].hex()})
+                  if len(hits)>=5000: break
+              if len(hits)>=5000: break
+          pathlib.Path("output/string-hits.json").write_text(json.dumps(hits,indent=2))
+          print(f"decoded={sum(1 for r in rows if r.get('status')=='ok')} resources={len(rows)} bytes={total}")
+          PY
+      - name: Upload decoded resources and index
+        uses: actions/upload-artifact@v4
+        with:
+          name: asphalt-jclx-janx-bulk-decoded
+          path: output/
+          retention-days: 7
