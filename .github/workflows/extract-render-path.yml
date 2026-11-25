@@ -1,0 +1,91 @@
+name: Extract Asphalt render path evidence
+on:
+  push:
+    paths:
+      - ".github/workflows/extract-render-path.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  extract-render:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Download and verify public release archive
+        env:
+          RELEASE_API: https://api.github.com/repos/${{ github.repository }}/releases/tags/asphalt-53.5.3a
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, urllib.request, os
+          req=urllib.request.Request(os.environ['RELEASE_API'],headers={'User-Agent':'asphalt-render-path-research'})
+          with urllib.request.urlopen(req,timeout=60) as r: release=json.load(r)
+          assets={a['name']:a['browser_download_url'] for a in release['assets']}
+          for name in ['Asphalt.zip.part00','Asphalt.zip.part01','Asphalt.zip.part02','Asphalt.zip.sha256']:
+              req=urllib.request.Request(assets[name],headers={'User-Agent':'asphalt-render-path-research'})
+              with urllib.request.urlopen(req,timeout=600) as r, open(name,'wb') as f:
+                  while True:
+                      b=r.read(1024*1024)
+                      if not b: break
+                      f.write(b)
+          PY
+          cat Asphalt.zip.part00 Asphalt.zip.part01 Asphalt.zip.part02 > Asphalt.zip
+          sha256sum -c Asphalt.zip.sha256
+      - name: Extract native renderer and complete shader sources
+        run: |
+          set -euo pipefail
+          mkdir -p out/shaders out/native out/reports
+          python3 - <<'PY'
+          import zipfile,io,re,pathlib
+          outer=zipfile.ZipFile('Asphalt.zip')
+          native=[]
+          for apkname in outer.namelist():
+              if not apkname.lower().endswith('.apk'): continue
+              try: apk=zipfile.ZipFile(io.BytesIO(outer.read(apkname)))
+              except Exception: continue
+              for info in apk.infolist():
+                  if info.filename.endswith('/libAsphalt9.so') or info.filename=='libAsphalt9.so':
+                      native.append((apkname,info.filename,apk.read(info.filename)))
+          if native:
+              name,path,data=native[0]
+              pathlib.Path('out/native/libAsphalt9.so').write_bytes(data)
+              pathlib.Path('out/reports/native-location.txt').write_text(f'{name} :: {path} :: {len(data)} bytes')
+          else:
+              pathlib.Path('out/reports/native-location.txt').write_text('libAsphalt9.so not found in nested APKs')
+          main_candidates=[n for n in outer.namelist() if n.lower().endswith('/main.apk') or n.lower()=='main.apk']
+          if not main_candidates: raise SystemExit('main.apk not found')
+          apk=zipfile.ZipFile(io.BytesIO(outer.read(main_candidates[0])))
+          rx=re.compile(rb'(?m)^\s*(//|#version|#import|#define|precision\s|uniform\s|attribute\s|varying\s|void\s+main|float\s+)',re.I)
+          names=[]
+          for info in apk.infolist():
+              if info.is_dir(): continue
+              try: b=apk.read(info.filename)
+              except Exception: continue
+              if len(b)<500 or not rx.search(b[:4096]): continue
+              sample=b[:4096].decode('utf-8','replace')
+              if sum(c.isprintable() or c in '\\r\\n\\t' for c in sample)/len(sample)<0.82: continue
+              safe=info.filename.rsplit('/',1)[-1]
+              pathlib.Path('out/shaders/'+safe+'.txt').write_bytes(b)
+              names.append(f'{safe}\t{len(b)}')
+          pathlib.Path('out/reports/shader-files.txt').write_text('\n'.join(names))
+          print('native files',len(native),'shader files',len(names))
+          PY
+      - name: Generate native metadata and render-setting strings
+        run: |
+          set -euo pipefail
+          if [ -f out/native/libAsphalt9.so ]; then
+            file out/native/libAsphalt9.so > out/reports/native-file.txt
+            readelf -h out/native/libAsphalt9.so > out/reports/native-elf-header.txt
+            readelf -d out/native/libAsphalt9.so > out/reports/native-dynamic.txt
+            readelf -Ws out/native/libAsphalt9.so > out/reports/native-symbols.txt
+            strings -a -n 5 -t x out/native/libAsphalt9.so | grep -iE 'resolution|render.?target|postFX|temporal.?aa|antialias|quality|fps|refresh|vsync|screenResolution|fixedResolution|resolutionScale|scene3D|sourceRenderTarget|SetFrameRate|Swappy|ANativeWindow' > out/reports/native-render-strings.txt || true
+          fi
+      - name: Upload render-path evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: asphalt-render-path-evidence
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
