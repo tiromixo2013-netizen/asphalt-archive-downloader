@@ -60,12 +60,12 @@ jobs:
                       if terms.search(s): hits.append((enc,info.filename,len(b),s[:240]))
               if shader_start.search(b[:4096]):
                   sample=b[:12000].decode("utf-8","replace")
-                  printable=sum(c.isprintable() or c in '\\r\\n\\t' for c in sample)/max(1,len(sample))
+                  printable=sum(c.isprintable() or c in '\r\n\t' for c in sample)/max(1,len(sample))
                   if printable>0.82: shaders.append((info.filename,len(b),sample[:5000]))
-          pathlib.Path("reports/main-resource-inventory.txt").write_text("\\n".join(f"{n}\\t{p}\\t{h}" for n,p,h in sorted(inventory,reverse=True)),encoding="utf-8")
-          pathlib.Path("reports/main-resource-string-hits.txt").write_text("\\n".join(f"{m}\\t{p}\\t{n}\\t{s}" for m,p,n,s in hits[:20000]),encoding="utf-8")
-          pathlib.Path("reports/main-resource-magic.txt").write_text("\\n".join(f"{k}\\t{v}" for k,v in magic.most_common(300)),encoding="utf-8")
-          pathlib.Path("reports/shader-candidates.txt").write_text("\\n\\n".join(f"FILE {p} SIZE {n}\\n{s}" for p,n,s in shaders[:100]),encoding="utf-8")
+          pathlib.Path("reports/main-resource-inventory.txt").write_text("\n".join(f"{n}\t{p}\t{h}" for n,p,h in sorted(inventory,reverse=True)),encoding="utf-8")
+          pathlib.Path("reports/main-resource-string-hits.txt").write_text("\n".join(f"{m}\t{p}\t{n}\t{s}" for m,p,n,s in hits[:20000]),encoding="utf-8")
+          pathlib.Path("reports/main-resource-magic.txt").write_text("\n".join(f"{k}\t{v}" for k,v in magic.most_common(300)),encoding="utf-8")
+          pathlib.Path("reports/shader-candidates.txt").write_text("\n\n".join(f"FILE {p} SIZE {n}\n{s}" for p,n,s in shaders[:100]),encoding="utf-8")
           print("entries",len(inventory),"keyword hits",len(hits),"shader candidates",len(shaders))
           PY
       - name: Upload scan reports
