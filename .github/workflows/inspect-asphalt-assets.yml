@@ -67,6 +67,40 @@ jobs:
           pathlib.Path("reports/config-string-hits.txt").write_text("\n".join(candidates[:1500]),encoding="utf-8")
           print("splits",len(targets),"entries",sum(extcounts.values()),"candidate files",len(candidates))
           PY
+      - name: Detect asset formats and embedded strings
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import zipfile,io,collections,pathlib,re,struct,json
+          outer=zipfile.ZipFile("Asphalt.zip")
+          out=[]
+          magic=collections.Counter()
+          text_hits=[]
+          json_files=[]
+          keywords=re.compile(rb'graphics|quality|resolution|frame.?rate|fps|render|texture|shader|settings|anti.?alias|shadow|upscal|vsync|refresh.?rate|menu|option',re.I)
+          for apk in sorted(n for n in outer.namelist() if n.lower().endswith(".apk") and n.lower().endswith(("gin.apk","lm.apk","main.apk","mdc.apk","mde.apk","prb.apk","sk.apk","so.apk","tex.apk","tex_lowres.apk"))):
+              z=zipfile.ZipFile(io.BytesIO(outer.read(apk)))
+              for info in z.infolist():
+                  if info.is_dir() or info.filename=="AndroidManifest.xml": continue
+                  try: b=z.read(info.filename)
+                  except: continue
+                  if len(b)<4: continue
+                  magic[(apk,b[:8].hex())]+=1
+                  if apk=="main.apk" and info.filename.lower().endswith(".json"):
+                      json_files.append((info.filename,b[:200000].decode("utf-8","replace")))
+                  # Scan all payloads, not only files with familiar extensions.
+                  if len(b)<=4*1024*1024:
+                      for enc,raw in (("ascii",b),("utf16le",b[::1])):
+                          m=keywords.search(raw)
+                          if m:
+                              s=max(0,m.start()-100); e=min(len(raw),m.end()+180)
+                              text_hits.append(f"## {apk} {info.filename} size={len(b)} encoding={enc}\n{raw[s:e].decode("utf-8","replace")[:400]}")
+                              break
+          pathlib.Path("reports/asset-magic-signatures.txt").write_text("\n".join(f"{a}\t{m}\t{c}" for (a,m),c in magic.most_common(300)),encoding="utf-8")
+          pathlib.Path("reports/all-payload-string-hits.txt").write_text("\n---\n".join(text_hits[:2500]),encoding="utf-8")
+          pathlib.Path("reports/main-json-files.txt").write_text("\n".join(f"## {p}\n{s}" for p,s in json_files),encoding="utf-8")
+          print("magic groups",len(magic),"string hits",len(text_hits),"json",len(json_files))
+          PY
       - name: Upload asset research reports
         uses: actions/upload-artifact@v4
         with:
