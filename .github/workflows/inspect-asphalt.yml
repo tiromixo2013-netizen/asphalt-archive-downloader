@@ -1,4 +1,4 @@
-name: Inspect Asphalt 53.5.3a package
+name: Deep inspect Asphalt 53.5.3a internals
 on:
   push:
     paths:
@@ -13,64 +13,94 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - name: Download original archive parts
+      - name: Download and verify original archive
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           gh release download asphalt-53.5.3a --repo "$GH_REPO" --pattern 'Asphalt.zip.part*' --dir .
-          test -s Asphalt.zip.part00
-          test -s Asphalt.zip.part01
-          test -s Asphalt.zip.part02
           cat Asphalt.zip.part00 Asphalt.zip.part01 Asphalt.zip.part02 > Asphalt.zip
           gh release download asphalt-53.5.3a --repo "$GH_REPO" --pattern 'Asphalt.zip.sha256' --dir .
           sha256sum -c Asphalt.zip.sha256
-      - name: Inventory archive and extract APK payloads
-        run: |
-          set -euo pipefail
-          mkdir -p inspect/apks
-          python3 - <<'PY'
-          import zipfile, pathlib, json
-          z = zipfile.ZipFile("Asphalt.zip")
-          entries = z.infolist()
-          pathlib.Path("inspect/archive-inventory.txt").write_text("\n".join(
-              f"{x.file_size}\t{x.compress_size}\t{x.filename}" for x in entries
-          ))
-          selected = [x for x in entries if x.filename.lower().endswith(".apk")]
-          report = []
-          for i, item in enumerate(selected):
-              safe = pathlib.Path(item.filename).name
-              out = pathlib.Path("inspect/apks") / f"{i:02d}-{safe}"
-              out.write_bytes(z.read(item))
-              report.append({"archive_path": item.filename, "extracted": str(out), "bytes": item.file_size})
-          pathlib.Path("inspect/apk-index.json").write_text(json.dumps(report, indent=2))
-          print(f"Archive entries: {len(entries)}; APKs extracted: {len(selected)}")
-          for row in report: print(row)
-          PY
-      - name: Inspect APK metadata and native libraries
+
+      - name: Extract APKs and inventory their internal files
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install -y aapt
-          {
-            for apk in inspect/apks/*.apk; do
-              [ -e "$apk" ] || continue
-              echo "===== $apk ====="
-              aapt dump badging "$apk" | head -n 35 || true
-              echo "--- native libraries ---"
-              unzip -Z1 "$apk" | grep -E '^lib/[^/]+/.*\.so$' | head -n 250 || true
-              echo "--- graphics / engine strings ---"
-              unzip -Z1 "$apk" | grep -Ei '(unity|unreal|gameloft|render|shader|vulkan|opengl|\.so$)' | head -n 250 || true
+          sudo apt-get install -y aapt binutils
+          mkdir -p inspect/apks inspect/native inspect/dex
+          python3 - <<'PY'
+          import zipfile, pathlib, json, re
+          z=zipfile.ZipFile("Asphalt.zip")
+          apk_entries=[x for x in z.infolist() if x.filename.lower().endswith(".apk")]
+          pathlib.Path("inspect/archive-inventory.txt").write_text("\n".join(f"{x.file_size}\t{x.compress_size}\t{x.filename}" for x in z.infolist()))
+          idx=[]
+          for i,x in enumerate(apk_entries):
+              p=pathlib.Path("inspect/apks")/f"{i:02d}-{pathlib.Path(x.filename).name}"
+              p.write_bytes(z.read(x))
+              idx.append({"archive_path":x.filename,"extracted":str(p),"bytes":x.file_size})
+          pathlib.Path("inspect/apk-index.json").write_text(json.dumps(idx,indent=2))
+          print("Extracted",len(idx),"APK splits")
+          PY
+          for apk in inspect/apks/*.apk; do
+            base=$(basename "$apk" .apk)
+            unzip -Z1 "$apk" | while IFS= read -r f; do
+              case "$f" in
+                lib/arm64-v8a/*.so)
+                  mkdir -p "inspect/native/$base"
+                  unzip -p "$apk" "$f" > "inspect/native/$base/$(basename "$f")" ;;
+                classes*.dex)
+                  mkdir -p "inspect/dex/$base"
+                  unzip -p "$apk" "$f" > "inspect/dex/$base/$(basename "$f")" ;;
+              esac
             done
-          } > inspect/apk-report.txt
-      - name: Upload compact inspection reports only
+          done
+
+      - name: Analyze manifests, assets, native ELF and code strings
+        run: |
+          set -euo pipefail
+          {
+            echo "===== PACKAGE MANIFESTS ====="
+            for apk in inspect/apks/*.apk; do
+              echo "--- $apk ---"
+              aapt dump badging "$apk" | head -n 22 || true
+              echo "DEX FILES:"
+              unzip -Z1 "$apk" | grep -E '^classes([0-9]+)?\.dex$' || true
+              echo "UI / SETTINGS / GRAPHICS RESOURCE PATHS:"
+              unzip -Z1 "$apk" | grep -Ei '(res/.*(layout|menu|xml|drawable)|assets/.*(ui|menu|setting|graphic|render|shader|config)|\.bundle$|\.pak$|\.obb$|\.json$|\.xml$)' | head -n 180 || true
+            done
+            echo "===== ALL LARGE ASSET TYPES ====="
+            for apk in inspect/apks/*.apk; do
+              echo "--- $(basename "$apk") ---"
+              unzip -Z1 "$apk" | awk -F. 'NF>1 {print tolower($NF)}' | sort | uniq -c | sort -nr | head -n 25
+            done
+            echo "===== NATIVE LIBRARY ELF DETAILS ====="
+            for so in inspect/native/*/*.so; do
+              echo "--- $so ---"
+              file "$so"
+              readelf -h "$so" | grep -E 'Class:|Machine:|Type:' || true
+              echo "NEEDED / GRAPHICS DYNAMIC SYMBOLS:"
+              readelf -d "$so" 2>/dev/null | grep NEEDED | head -n 35 || true
+              readelf -Ws "$so" 2>/dev/null | grep -Ei '(egl|gl[A-Z]|vk[A-Z]|vulkan|renderer|render|swap|present|framebuffer|shader)' | head -n 100 || true
+              echo "GRAPHICS / ENGINE STRINGS:"
+              strings -a "$so" | grep -Ei '(OpenGL ES|OpenGL|Vulkan|vk[A-Z]|egl[A-Z]|gl[A-Z]|renderer|render.?pass|frame.?buffer|shader|quality|resolution|graphics.?settings|frame.?rate|gameloft|asphalt)' | head -n 180 || true
+            done
+            echo "===== DEX CLASS / UI / SETTINGS STRINGS ====="
+            for dex in inspect/dex/*/*.dex; do
+              echo "--- $dex ---"
+              strings -a "$dex" | grep -Ei '(Graphics|Settings|Resolution|Quality|FrameRate|Render|Menu|GameOptions|OpenGL|Vulkan|Gameloft)' | head -n 120 || true
+            done
+          } > inspect/deep-report.txt
+          du -h inspect/deep-report.txt
+
+      - name: Upload text reports only
         uses: actions/upload-artifact@v4
         with:
-          name: asphalt-53.5.3a-inspection-reports
+          name: asphalt-53.5.3a-deep-inspection
           path: |
             inspect/archive-inventory.txt
             inspect/apk-index.json
-            inspect/apk-report.txt
+            inspect/deep-report.txt
           if-no-files-found: error
           retention-days: 7
