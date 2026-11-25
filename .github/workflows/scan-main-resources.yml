@@ -15,8 +15,8 @@ jobs:
     steps:
       - name: Download and verify archive
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: \${{ github.token }}
+          GH_REPO: \${{ github.repository }}
         run: |
           set -euo pipefail
           gh release download asphalt-53.5.3a --repo "$GH_REPO" --pattern 'Asphalt.zip.part*' --dir .
@@ -28,14 +28,14 @@ jobs:
           set -euo pipefail
           mkdir -p reports
           python3 - <<'PY'
-          import zipfile,io,re,collections,pathlib,json
+          import zipfile,io,re,collections,pathlib
           outer=zipfile.ZipFile("Asphalt.zip")
           candidates=[n for n in outer.namelist() if n.lower().endswith("/main.apk") or n.lower()=="main.apk"]
           if not candidates:
               raise SystemExit("main.apk not found in outer archive")
           apk=zipfile.ZipFile(io.BytesIO(outer.read(candidates[0])))
           keywords=re.compile(r'graphics|quality|resolution|frame.?rate|fps|render|texture|shader|settings|anti.?alias|shadow|upscal|vsync|refresh.?rate|menu|option|performance|display|preset|scale|vulkan|opengl',re.I)
-          ascii_pat=rb'[\\x20-\\x7e]{4,}'
+          ascii_pat=rb'[\x20-\x7e]{4,}'
           hits=[]; inventory=[]; magic=collections.Counter()
           for info in apk.infolist():
               if info.is_dir() or info.filename=="AndroidManifest.xml": continue
@@ -43,7 +43,6 @@ jobs:
               except Exception: continue
               magic[b[:8].hex()]+=1
               inventory.append((len(b),info.filename,b[:16].hex()))
-              # Raw strings and single-byte XOR 0xAB decoded strings
               for mode,data in (("raw",b),("xor_ab",bytes(x^0xAB for x in b))):
                   for q in re.findall(ascii_pat,data):
                       s=q.decode("ascii","ignore")
@@ -51,9 +50,9 @@ jobs:
                           hits.append((mode,info.filename,len(b),s[:240]))
                           if len(hits)>=30000: break
                   if len(hits)>=30000: break
-          pathlib.Path("reports/main-resource-inventory.txt").write_text("\\n".join(f"{n}\\t{p}\\t{h}" for n,p,h in sorted(inventory,reverse=True)),encoding="utf-8")
-          pathlib.Path("reports/main-resource-string-hits.txt").write_text("\\n".join(f"{m}\\t{p}\\t{n}\\t{s}" for m,p,n,s in hits),encoding="utf-8")
-          pathlib.Path("reports/main-resource-magic.txt").write_text("\\n".join(f"{k}\\t{v}" for k,v in magic.most_common(300)),encoding="utf-8")
+          pathlib.Path("reports/main-resource-inventory.txt").write_text("\n".join(f"{n}\t{p}\t{h}" for n,p,h in sorted(inventory,reverse=True)),encoding="utf-8")
+          pathlib.Path("reports/main-resource-string-hits.txt").write_text("\n".join(f"{m}\t{p}\t{n}\t{s}" for m,p,n,s in hits),encoding="utf-8")
+          pathlib.Path("reports/main-resource-magic.txt").write_text("\n".join(f"{k}\t{v}" for k,v in magic.most_common(300)),encoding="utf-8")
           print("entries",len(inventory),"keyword hits",len(hits),"top magic groups",len(magic))
           PY
       - name: Upload scan reports
