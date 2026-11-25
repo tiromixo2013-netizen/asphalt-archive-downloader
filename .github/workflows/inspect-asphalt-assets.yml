@@ -1,0 +1,76 @@
+name: Inspect Asphalt game data assets
+on:
+  push:
+    paths:
+      - ".github/workflows/inspect-asphalt-assets.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  inspect-assets:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Download and verify original archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh release download asphalt-53.5.3a --repo "$GH_REPO" --pattern 'Asphalt.zip.part*' --dir .
+          cat Asphalt.zip.part00 Asphalt.zip.part01 Asphalt.zip.part02 > Asphalt.zip
+          gh release download asphalt-53.5.3a --repo "$GH_REPO" --pattern 'Asphalt.zip.sha256' --dir .
+          sha256sum -c Asphalt.zip.sha256
+      - name: Inventory game-data split APK contents
+        run: |
+          set -euo pipefail
+          mkdir -p reports
+          python3 - <<'PY'
+          import zipfile, io, collections, pathlib, re
+          outer=zipfile.ZipFile("Asphalt.zip")
+          targets=[n for n in outer.namelist() if n.lower().endswith(".apk") and not n.lower().endswith(("asphalt-53.5.3a.apk","config.arm64_v8a.apk","config.xxhdpi.apk"))]
+          rows=[]
+          extcounts=collections.Counter()
+          candidates=[]
+          keywords=re.compile(rb'graphics|quality|resolution|frame.?rate|fps|render|texture|shader|settings|anti.?alias|shadow|upscal|vsync|refresh.?rate',re.I)
+          for name in sorted(targets):
+              data=outer.read(name)
+              try: z=zipfile.ZipFile(io.BytesIO(data))
+              except Exception as e:
+                  rows.append(f"## {name} INVALID_ZIP {e}")
+                  continue
+              infos=z.infolist()
+              rows.append(f"## {name} bytes={len(data)} entries={len(infos)}")
+              for i in infos:
+                  if i.is_dir(): continue
+                  p=i.filename
+                  ext=pathlib.PurePosixPath(p).suffix.lower() or "[no-ext]"
+                  extcounts[(name,ext)]+=1
+                  rows.append(f"{i.file_size}\t{i.compress_size}\t{p}")
+                  low=p.lower()
+                  if (ext in {".json",".xml",".ini",".cfg",".conf",".txt",".csv",".lua",".js",".yaml",".yml",".properties",".strings",".plist",".dat"} or any(k in low for k in ("setting","config","graphic","render","quality","localiz","string"))):
+                      if i.file_size <= 8*1024*1024:
+                          try:
+                              b=z.read(p)
+                              if keywords.search(b):
+                                  hits=list(re.finditer(keywords,b))
+                                  sample=[]
+                                  for m in hits[:30]:
+                                      s=max(0,m.start()-100); e=min(len(b),m.end()+180)
+                                      sample.append(b[s:e].decode("utf-8","replace").replace("\\x00"," ")[:350])
+                                  candidates.append(f"\n### {name} :: {p} size={i.file_size}\n"+"\n---\n".join(sample))
+                          except Exception: pass
+          pathlib.Path("reports/split-file-inventory.txt").write_text("\n".join(rows),encoding="utf-8")
+          pathlib.Path("reports/split-extension-counts.txt").write_text("\n".join(f"{n}\t{e}\t{c}" for (n,e),c in sorted(extcounts.items())),encoding="utf-8")
+          pathlib.Path("reports/config-string-hits.txt").write_text("\n".join(candidates[:1500]),encoding="utf-8")
+          print("splits",len(targets),"entries",sum(extcounts.values()),"candidate files",len(candidates))
+          PY
+      - name: Upload asset research reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: asphalt-53.5.3a-game-data-assets
+          path: reports/
+          if-no-files-found: error
+          retention-days: 7
