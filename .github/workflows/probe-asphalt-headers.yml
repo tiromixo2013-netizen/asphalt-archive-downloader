@@ -54,7 +54,9 @@ jobs:
                   rows.append('zstd_offsets='+repr(offs[:30]))
                   for q in offs[:10]:
                       try:
-                          reader=d.stream_reader(io.BytesIO(b[q:]))\n                          raw=reader.read(16*1024*1024+1)\n                          reader.close()
+                          reader=d.stream_reader(io.BytesIO(b[q:]))
+                          raw=reader.read(16*1024*1024+1)
+                          reader.close()
                           rows.append(f'DECODE_OK offset={q} bytes={len(raw)} prefix={raw[:48].hex()}')
                           if len(raw)>0:
                               pathlib.Path('reports').joinpath(f'{sig.decode("ascii").strip()}_{len(rows)}.bin').write_bytes(raw)
